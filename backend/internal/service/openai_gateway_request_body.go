@@ -192,6 +192,15 @@ func normalizeOpenAICompactRequestBody(body []byte) ([]byte, bool, error) {
 		}
 		normalized = next
 	}
+	// /responses/compact accepts at most high reasoning effort.
+	switch normalizeOpenAIReasoningEffort(gjson.GetBytes(normalized, "reasoning.effort").String()) {
+	case "xhigh", "max":
+		next, err := sjson.SetBytes(normalized, "reasoning.effort", "high")
+		if err != nil {
+			return body, false, fmt.Errorf("cap compact reasoning effort: %w", err)
+		}
+		normalized = next
+	}
 
 	if bytes.Equal(bytes.TrimSpace(body), bytes.TrimSpace(normalized)) {
 		return body, false, nil
@@ -1155,8 +1164,10 @@ func normalizeOpenAIReasoningEffort(raw string) string {
 		return ""
 	case "low", "medium", "high":
 		return value
-	case "xhigh", "extrahigh", "max":
+	case "xhigh", "extrahigh":
 		return "xhigh"
+	case "max":
+		return "max"
 	default:
 		// Only store known effort levels for now to keep UI consistent.
 		return ""

@@ -2395,6 +2395,19 @@ func TestNormalizeOpenAICompactRequestBodyPreservesCurrentCodexPayloadFields(t *
 	require.False(t, gjson.GetBytes(normalized, "prompt_cache_key").Exists())
 }
 
+func TestNormalizeOpenAICompactRequestBodyCapsReasoningEffortAtHigh(t *testing.T) {
+	for effort, want := range map[string]string{
+		"high":  "high",
+		"xhigh": "high",
+		"max":   "high",
+	} {
+		normalized, _, err := normalizeOpenAICompactRequestBody([]byte(`{"reasoning":{"effort":"` + effort + `"}}`))
+
+		require.NoError(t, err, effort)
+		require.Equal(t, want, gjson.GetBytes(normalized, "reasoning.effort").String(), effort)
+	}
+}
+
 func TestOpenAIBuildUpstreamRequestOpenAIPassthroughPreservesCompactPath(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()

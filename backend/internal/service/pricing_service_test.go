@@ -219,6 +219,19 @@ func TestDefaultPricingIncludesCodexAutoReview(t *testing.T) {
 	require.InDelta(t, 5e-7, got.CacheReadInputTokenCost, 1e-12)
 }
 
+func TestDefaultPricingGPT56ReasoningCapabilities(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "resources", "model-pricing", "model_prices_and_context_window.json"))
+	require.NoError(t, err)
+
+	var models map[string]map[string]any
+	require.NoError(t, json.Unmarshal(data, &models))
+	for _, model := range []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"} {
+		require.Equal(t, true, models[model]["supports_max_reasoning_effort"])
+		_, declaresUltra := models[model]["supports_ultra_reasoning_effort"]
+		require.False(t, declaresUltra)
+	}
+}
+
 func TestGetModelPricing_Gpt54MiniUsesDedicatedStaticFallbackWhenRemoteMissing(t *testing.T) {
 	svc := &PricingService{
 		pricingData: map[string]*LiteLLMModelPricing{

@@ -61,8 +61,16 @@ func ChatCompletionsToResponses(req *ChatCompletionsRequest) (*ResponsesRequest,
 		out.MaxOutputTokens = &v
 	}
 
-	// reasoning_effort → reasoning.effort + reasoning.summary="auto"
-	if req.ReasoningEffort != "" {
+	// Preserve a nested reasoning object when a Responses-compatible client
+	// sends one to the Chat Completions endpoint.
+	if req.Reasoning != nil && (req.Reasoning.Effort != "" || req.Reasoning.Summary != "" || req.Reasoning.Context != "") {
+		reasoning := *req.Reasoning
+		if reasoning.Effort == "" {
+			reasoning.Effort = req.ReasoningEffort
+		}
+		out.Reasoning = &reasoning
+	} else if req.ReasoningEffort != "" {
+		// reasoning_effort → reasoning.effort + reasoning.summary="auto"
 		out.Reasoning = &ResponsesReasoning{
 			Effort:  req.ReasoningEffort,
 			Summary: "auto",
