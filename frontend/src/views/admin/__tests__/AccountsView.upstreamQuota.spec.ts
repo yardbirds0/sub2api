@@ -935,7 +935,7 @@ describe('admin AccountsView upstream quota state', () => {
     )
 
     expect(badge(1).text()).toBe('Sub2API')
-    expect(badge(1).get('img').attributes('src')).toBe('/logo.png')
+    expect(badge(1).get('img').attributes('src')).toBe('/logo.svg')
     expect(badge(1).element.firstElementChild?.tagName).toBe('IMG')
     expect(badge(2).text()).toBe('New API')
     expect(badge(3).text()).toBe('New API')

@@ -228,7 +228,10 @@ func invalidateProxyProbeSnapshots(ctx context.Context, exec sqlExecutor, proxyI
 		WHERE proxy_id = $1
 			AND platform = 'openai'
 			AND type = 'apikey'
-			AND (extra ? 'upstream_billing_probe' OR extra ? 'upstream_identity')
+			AND (
+				(extra ? 'upstream_billing_probe' AND extra -> 'upstream_billing_probe' <> 'null'::jsonb)
+				OR (extra ? 'upstream_identity' AND extra -> 'upstream_identity' <> 'null'::jsonb)
+			)
 			AND deleted_at IS NULL
 		RETURNING id
 	`, proxyID)
@@ -739,7 +742,10 @@ func (r *proxyRepository) sweepOneExpiredProxyOnExec(ctx context.Context, exec s
 			UPDATE accounts SET proxy_id=NULL, proxy_fallback_origin_id=$1,
 				extra=CASE
 					WHEN platform='openai' AND type='apikey'
-						AND (extra ? 'upstream_billing_probe' OR extra ? 'upstream_identity')
+						AND (
+							(extra ? 'upstream_billing_probe' AND extra -> 'upstream_billing_probe' <> 'null'::jsonb)
+							OR (extra ? 'upstream_identity' AND extra -> 'upstream_identity' <> 'null'::jsonb)
+						)
 					THEN extra - 'upstream_billing_probe' - 'upstream_identity'
 					ELSE extra
 				END,
@@ -751,7 +757,10 @@ func (r *proxyRepository) sweepOneExpiredProxyOnExec(ctx context.Context, exec s
 			UPDATE accounts SET proxy_id=$2, proxy_fallback_origin_id=$1,
 				extra=CASE
 					WHEN platform='openai' AND type='apikey'
-						AND (extra ? 'upstream_billing_probe' OR extra ? 'upstream_identity')
+						AND (
+							(extra ? 'upstream_billing_probe' AND extra -> 'upstream_billing_probe' <> 'null'::jsonb)
+							OR (extra ? 'upstream_identity' AND extra -> 'upstream_identity' <> 'null'::jsonb)
+						)
 					THEN extra - 'upstream_billing_probe' - 'upstream_identity'
 					ELSE extra
 				END,

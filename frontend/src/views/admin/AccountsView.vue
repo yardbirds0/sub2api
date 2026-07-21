@@ -1689,7 +1689,7 @@ function getUpstreamIdentityMeta(row: Account): UpstreamIdentityBadgeMeta | null
   if (identity.provider === 'sub2api') {
     return {
       label: 'Sub2API',
-      logo: '/logo.png',
+      logo: '/logo.svg',
       ariaLabel: t('admin.accounts.upstreamBilling.identitySub2API')
     }
   }
