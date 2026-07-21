@@ -24,6 +24,8 @@ import type {
   UpstreamBillingProbeResult,
   UpstreamBillingProbeSettings,
   UpstreamBillingRatesResponse,
+  UpstreamBillingRateHistoryDays,
+  UpstreamBillingRateHistoryResponse,
   UpstreamQuotaQueryResult
 } from '@/types'
 
@@ -176,6 +178,38 @@ export async function getUpstreamBillingRatesWithEtag(
     etag: etagHeader,
     data: response.data
   }
+}
+
+export interface AccountUpstreamBillingRateHistoryWithEtagResult {
+  notModified: boolean
+  etag: string | null
+  data: UpstreamBillingRateHistoryResponse | null
+}
+
+export async function getUpstreamBillingRateHistoryWithEtag(
+  id: number,
+  days: UpstreamBillingRateHistoryDays = 90,
+  options?: {
+    signal?: AbortSignal
+    etag?: string | null
+  }
+): Promise<AccountUpstreamBillingRateHistoryWithEtagResult> {
+  const headers: Record<string, string> = {}
+  if (options?.etag) headers['If-None-Match'] = options.etag
+  const response = await apiClient.get<UpstreamBillingRateHistoryResponse>(
+    `/admin/accounts/${id}/upstream-billing-rate-history`,
+    {
+      params: { days, limit: 500 },
+      headers,
+      signal: options?.signal,
+      validateStatus: (status) => (status >= 200 && status < 300) || status === 304
+    }
+  )
+  const etagHeader = typeof response.headers?.etag === 'string' ? response.headers.etag : null
+  if (response.status === 304) {
+    return { notModified: true, etag: etagHeader, data: null }
+  }
+  return { notModified: false, etag: etagHeader, data: response.data }
 }
 
 /**
@@ -950,6 +984,7 @@ export const accountsAPI = {
   list,
   listWithEtag,
   getUpstreamBillingRatesWithEtag,
+  getUpstreamBillingRateHistoryWithEtag,
   getById,
   create,
   duplicate,

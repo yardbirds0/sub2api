@@ -23,7 +23,19 @@
           data-testid="upstream-billing-details"
         >
           <template #trigger>
+            <button
+              v-if="hasNumericRate"
+              type="button"
+              class="block w-full cursor-pointer truncate rounded-sm text-left leading-5 tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-sky-500/30"
+              :class="rateValueClass"
+              :aria-label="t('admin.accounts.upstreamBilling.rateValueDetails', { value: primaryValue })"
+              data-testid="upstream-billing-rate"
+              @click.stop="$emit('open-history')"
+            >
+              {{ primaryValue }}
+            </button>
             <span
+              v-else
               class="block w-full truncate text-left leading-5 tabular-nums"
               :class="rateValueClass"
               data-testid="upstream-billing-rate"
@@ -258,6 +270,7 @@ const props = withDefaults(defineProps<{
 
 defineEmits<{
   (event: 'probe'): void
+  (event: 'open-history'): void
   (event: 'query-quota'): void
 }>()
 

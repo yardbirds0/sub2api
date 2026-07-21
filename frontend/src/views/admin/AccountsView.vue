@@ -365,6 +365,7 @@
               :rate-feedback="upstreamBillingFeedback.get(row.id)"
               :quota-feedback="upstreamQuotaFeedback.get(row.id)"
               @probe="handleProbeUpstreamBilling(row)"
+              @open-history="handleOpenUpstreamBillingRateHistory(row)"
               @query-quota="handleQueryUpstreamQuota(row)"
             />
           </template>
@@ -445,6 +446,11 @@
     <ReAuthAccountModal :show="showReAuth" :account="reAuthAcc" @close="closeReAuthModal" @reauthorized="handleAccountUpdated" />
     <AccountTestModal :show="showTest" :account="testingAcc" @close="closeTestModal" />
     <AccountStatsModal :show="showStats" :account="statsAcc" @close="closeStatsModal" />
+    <UpstreamBillingRateHistoryDialog
+      :show="showUpstreamBillingRateHistory"
+      :account="upstreamBillingRateHistoryAccount"
+      @close="closeUpstreamBillingRateHistory"
+    />
     <ScheduledTestsPanel :show="showSchedulePanel" :account-id="scheduleAcc?.id ?? null" :model-options="scheduleModelOptions" @close="closeSchedulePanel" />
     <AccountActionMenu :show="menu.show" :account="menu.acc" :position="menu.pos" @close="menu.show = false" @test="handleTest" @stats="handleViewStats" @schedule="handleSchedule" @duplicate="handleDuplicateAccount" @reauth="handleReAuth" @refresh-token="handleRefresh" @recover-state="handleRecoverState" @reset-quota="handleResetQuota" @set-privacy="handleSetPrivacy" @create-spark-shadow="handleCreateSparkShadow" />
     <SyncFromCrsModal :show="showSync" @close="showSync = false" @synced="handleAccountDataReplaced" />
@@ -502,6 +508,7 @@ import ImportDataModal from '@/components/admin/account/ImportDataModal.vue'
 import ReAuthAccountModal from '@/components/admin/account/ReAuthAccountModal.vue'
 import AccountTestModal from '@/components/admin/account/AccountTestModal.vue'
 import AccountStatsModal from '@/components/admin/account/AccountStatsModal.vue'
+import UpstreamBillingRateHistoryDialog from '@/components/account/UpstreamBillingRateHistoryDialog.vue'
 import ScheduledTestsPanel from '@/components/admin/account/ScheduledTestsPanel.vue'
 import type { SelectOption } from '@/components/common/Select.vue'
 import AccountStatusIndicator from '@/components/account/AccountStatusIndicator.vue'
@@ -519,6 +526,7 @@ import { formatDateTime, formatRelativeTime } from '@/utils/format'
 import { proxyExpiryBadgeClass, proxyExpiryLabelKey } from '@/utils/proxyExpiry'
 import { extractApiErrorMessage } from '@/utils/apiError'
 import { sanitizeUrl } from '@/utils/url'
+import { invalidateUpstreamBillingRateHistoryCache } from '@/components/account/upstreamBillingRateHistoryCache'
 import type { Account, AccountPlatform, AccountSchedulerGroupScore, AccountType, Proxy as AccountProxy, AdminGroup, WindowStats, ClaudeModel, UpstreamBillingProbeSnapshot, UpstreamQuotaQueryResult } from '@/types'
 
 const { t } = useI18n()
@@ -582,6 +590,7 @@ const showCreateShadowDialog = ref(false)
 const showReAuth = ref(false)
 const showTest = ref(false)
 const showStats = ref(false)
+const showUpstreamBillingRateHistory = ref(false)
 const showErrorPassthrough = ref(false)
 const showTLSFingerprintProfiles = ref(false)
 const edAcc = ref<Account | null>(null)
@@ -591,6 +600,7 @@ const creatingShadowAcc = ref<Account | null>(null)
 const reAuthAcc = ref<Account | null>(null)
 const testingAcc = ref<Account | null>(null)
 const statsAcc = ref<Account | null>(null)
+const upstreamBillingRateHistoryAccount = ref<Account | null>(null)
 const showSchedulePanel = ref(false)
 const scheduleAcc = ref<Account | null>(null)
 const scheduleModelOptions = ref<SelectOption[]>([])
@@ -1360,6 +1370,7 @@ const isAnyModalOpen = computed(() => {
     showReAuth.value ||
     showTest.value ||
     showStats.value ||
+    showUpstreamBillingRateHistory.value ||
     showSchedulePanel.value ||
     showErrorPassthrough.value ||
     showTLSFingerprintProfiles.value
@@ -1395,6 +1406,9 @@ const syncAccountRefs = (nextAccount: Account) => {
   if (reAuthAcc.value?.id === nextAccount.id) reAuthAcc.value = nextAccount
   if (tempUnschedAcc.value?.id === nextAccount.id) tempUnschedAcc.value = nextAccount
   if (deletingAcc.value?.id === nextAccount.id) deletingAcc.value = nextAccount
+  if (upstreamBillingRateHistoryAccount.value?.id === nextAccount.id) {
+    upstreamBillingRateHistoryAccount.value = nextAccount
+  }
   if (menu.acc?.id === nextAccount.id) menu.acc = nextAccount
 }
 
@@ -1711,6 +1725,14 @@ const cols = computed(() =>
 )
 
 const handleEdit = (a: Account) => { edAcc.value = a; showEdit.value = true }
+const handleOpenUpstreamBillingRateHistory = (a: Account) => {
+  upstreamBillingRateHistoryAccount.value = a
+  showUpstreamBillingRateHistory.value = true
+}
+const closeUpstreamBillingRateHistory = () => {
+  showUpstreamBillingRateHistory.value = false
+  upstreamBillingRateHistoryAccount.value = null
+}
 const openMenu = (a: Account, e: MouseEvent) => {
   menu.acc = a
 
@@ -1774,6 +1796,7 @@ const handleBulkDelete = async () => {
     const deletedAccountIDs = accountIDs.filter((_, index) => results[index].status === 'fulfilled')
     deletedAccountIDs.forEach(id => {
       invalidateOneUpstreamQuotaState(id)
+      invalidateUpstreamBillingRateHistoryCache(id)
     })
     removeSelectedAccounts(deletedAccountIDs)
     if (deletedAccountIDs.length > 0) reload()
@@ -2020,7 +2043,23 @@ const openBulkEditFiltered = async () => {
   showBulkEdit.value = true
 }
 
-const handleBulkUpdated = () => {
+const handleBulkUpdated = (result?: { baseURL?: string }) => {
+  const baseURL = result?.baseURL
+  if (baseURL != null) {
+    if (bulkEditTarget.value?.mode === 'selected') {
+      bulkEditTarget.value.accountIds.forEach(accountID => {
+        const current = accounts.value.find(account => account.id === accountID)
+        const currentBaseURL = typeof current?.credentials?.base_url === 'string'
+          ? current.credentials.base_url
+          : ''
+        if (currentBaseURL !== baseURL) {
+          invalidateUpstreamBillingRateHistoryCache(accountID)
+        }
+      })
+    } else {
+      invalidateUpstreamBillingRateHistoryCache()
+    }
+  }
   invalidateUpstreamQuotaState()
   showBulkEdit.value = false
   bulkEditTarget.value = null
@@ -2029,6 +2068,7 @@ const handleBulkUpdated = () => {
 }
 const handleAccountDataReplaced = () => {
   invalidateUpstreamQuotaState()
+  invalidateUpstreamBillingRateHistoryCache()
   reload()
 }
 const handleDataImported = () => {
@@ -2295,6 +2335,18 @@ const invalidateUpstreamQuotaState = (accountID?: number) => {
   invalidateOneUpstreamQuotaState(accountID)
 }
 const handleAccountUpdated = (updatedAccount: Account) => {
+  const previousAccount = accounts.value.find(account => account.id === updatedAccount.id) ??
+    (edAcc.value?.id === updatedAccount.id ? edAcc.value : null) ??
+    (reAuthAcc.value?.id === updatedAccount.id ? reAuthAcc.value : null)
+  const previousBaseURL = typeof previousAccount?.credentials?.base_url === 'string'
+    ? previousAccount.credentials.base_url
+    : ''
+  const nextBaseURL = typeof updatedAccount.credentials?.base_url === 'string'
+    ? updatedAccount.credentials.base_url
+    : ''
+  if (previousBaseURL !== nextBaseURL) {
+    invalidateUpstreamBillingRateHistoryCache(updatedAccount.id)
+  }
   invalidateUpstreamQuotaState(updatedAccount.id)
   patchAccountInList(updatedAccount)
   enterAutoRefreshSilentWindow()
@@ -2491,6 +2543,7 @@ const confirmDelete = async () => {
   try {
     await adminAPI.accounts.delete(accountID)
     invalidateUpstreamQuotaState(accountID)
+    invalidateUpstreamBillingRateHistoryCache(accountID)
     showDeleteDialog.value = false
     deletingAcc.value = null
     reload()
@@ -2592,6 +2645,7 @@ onUnmounted(() => {
   upstreamQuotaFeedbackTimers.forEach(timer => clearTimeout(timer))
   upstreamBillingFeedbackTimers.clear()
   upstreamQuotaFeedbackTimers.clear()
+  invalidateUpstreamBillingRateHistoryCache()
   window.removeEventListener('scroll', handleScroll, true)
   document.removeEventListener('click', handleClickOutside)
 })

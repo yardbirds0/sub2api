@@ -278,9 +278,16 @@ func (s *UpstreamBillingProbeService) Start() {
 		return
 	}
 	s.started = true
+	_, hasHistoryPruner := s.accountRepo.(upstreamBillingRateHistoryPruner)
 	s.wg.Add(1)
+	if hasHistoryPruner {
+		s.wg.Add(1)
+	}
 	s.mu.Unlock()
 	go s.runLoop()
+	if hasHistoryPruner {
+		go s.runRateHistoryRetentionLoop()
+	}
 }
 
 func (s *UpstreamBillingProbeService) Stop() {

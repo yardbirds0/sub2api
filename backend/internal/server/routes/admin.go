@@ -350,6 +350,7 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 		accounts.POST("/sync/crs", h.Admin.Account.SyncFromCRS)
 		accounts.POST("/sync/crs/preview", h.Admin.Account.PreviewFromCRS)
 		accounts.PUT("/:id", h.Admin.Account.Update)
+		accounts.GET("/:id/upstream-billing-rate-history", h.Admin.Account.GetUpstreamBillingRateHistory)
 		accounts.PUT("/:id/upstream-billing-probe", h.Admin.Account.SetUpstreamBillingProbeEnabled)
 		accounts.POST("/:id/upstream-billing-probe", h.Admin.Account.ProbeUpstreamBilling)
 		accounts.POST("/:id/upstream-quota/query", h.Admin.Account.QueryUpstreamQuota)

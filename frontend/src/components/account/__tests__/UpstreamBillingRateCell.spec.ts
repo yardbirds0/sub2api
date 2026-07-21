@@ -117,9 +117,10 @@ describe('UpstreamBillingRateCell', () => {
     )
 
     const rateValue = wrapper.get('[data-testid="upstream-billing-rate"]')
-    expect(rateValue.element.tagName).toBe('SPAN')
+    expect(rateValue.element.tagName).toBe('BUTTON')
     expect(rateValue.classes()).toContain('text-[11px]')
     expect(rateValue.classes()).toContain('text-sky-500')
+    expect(rateValue.attributes('aria-label')).toBe('admin.accounts.upstreamBilling.rateValueDetails:0.6x')
     await wrapper.setProps({
       rateError: true,
       rateErrorAt: '2026-07-13T00:29:00Z'
@@ -142,6 +143,48 @@ describe('UpstreamBillingRateCell', () => {
     expect(errorDetails?.textContent).toContain('admin.accounts.upstreamBilling.probeFailedReason')
     expect(errorDetails?.parentElement?.lastElementChild).toBe(errorDetails)
     wrapper.unmount()
+  })
+
+  it('opens history only from a numeric rate', async () => {
+    const wrapper = mount(UpstreamBillingRateCell, {
+      props: {
+        account: makeAccount({
+          extra: {
+            upstream_billing_probe: {
+              status: 'ok',
+              data: billingData,
+              received_at: '2026-07-13T00:00:00Z',
+              fresh_until: '2026-07-14T00:00:00Z',
+              last_attempt_at: '2026-07-13T00:00:00Z',
+              next_probe_at: '2026-07-13T00:30:00Z'
+            }
+          }
+        }),
+        now: Date.now()
+      }
+    })
+
+    await wrapper.get('[data-testid="upstream-billing-rate"]').trigger('click')
+    expect(wrapper.emitted('open-history')).toHaveLength(1)
+
+    await wrapper.get('[data-testid="upstream-billing-probe"]').trigger('click')
+    expect(wrapper.emitted('probe')).toHaveLength(1)
+    expect(wrapper.emitted('open-history')).toHaveLength(1)
+
+    await wrapper.setProps({
+      account: makeAccount({
+        extra: {
+          upstream_billing_probe: {
+            status: 'unsupported',
+            last_attempt_at: '2026-07-13T00:00:00Z',
+            next_probe_at: '2026-07-13T00:30:00Z'
+          }
+        }
+      })
+    })
+    expect(wrapper.get('[data-testid="upstream-billing-rate"]').element.tagName).toBe('SPAN')
+    await wrapper.get('[data-testid="upstream-billing-rate"]').trigger('click')
+    expect(wrapper.emitted('open-history')).toHaveLength(1)
   })
 
   it('renders stable rate and quota rows with independent accessible actions', async () => {
