@@ -266,6 +266,35 @@
                 </span>
               </div>
               <div
+                v-if="getUpstreamIdentityMeta(row)"
+                class="inline-flex self-start items-stretch overflow-hidden rounded-md text-xs font-medium"
+              >
+                <span
+                  data-testid="upstream-identity-badge"
+                  :data-provider="row.extra?.upstream_identity?.provider"
+                  :data-variant="row.extra?.upstream_identity?.variant || ''"
+                  class="inline-flex items-center gap-1 bg-emerald-100 px-1.5 py-1 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400"
+                  :aria-label="getUpstreamIdentityMeta(row)?.ariaLabel"
+                >
+                  <img :src="getUpstreamIdentityMeta(row)?.logo" alt="" class="h-3 w-3 shrink-0 object-contain" />
+                  <span>{{ getUpstreamIdentityMeta(row)?.label }}</span>
+                </span>
+                <span
+                  v-if="getUpstreamSiteLogoKey(row)"
+                  data-testid="upstream-site-logo-badge"
+                  class="inline-flex items-center bg-emerald-50 px-1.5 py-1 dark:bg-emerald-950/20"
+                  :aria-label="t('admin.accounts.upstreamBilling.identitySiteLogo')"
+                >
+                  <img
+                    v-if="getUpstreamSiteLogoURL(row)"
+                    :src="getUpstreamSiteLogoURL(row)"
+                    alt=""
+                    class="h-3.5 w-3.5 shrink-0 object-contain"
+                  />
+                  <span v-else class="h-3.5 w-3.5" aria-hidden="true" />
+                </span>
+              </div>
+              <div
                 v-if="getOpenAICompactMeta(row)"
                 :class="[
                   'inline-flex items-center gap-1.5 pl-0.5 text-[11px] font-medium leading-4',
@@ -527,7 +556,11 @@ import { proxyExpiryBadgeClass, proxyExpiryLabelKey } from '@/utils/proxyExpiry'
 import { extractApiErrorMessage } from '@/utils/apiError'
 import { sanitizeUrl } from '@/utils/url'
 import { invalidateUpstreamBillingRateHistoryCache } from '@/components/account/upstreamBillingRateHistoryCache'
-import type { Account, AccountPlatform, AccountSchedulerGroupScore, AccountType, Proxy as AccountProxy, AdminGroup, WindowStats, ClaudeModel, UpstreamBillingProbeSnapshot, UpstreamQuotaQueryResult } from '@/types'
+// Official QuantumNous/new-api assets, pinned from v0.2.8.7 and commit
+// 4aa08f917eedecf77cef387f2337af88277fbbd0 respectively.
+import newAPILegacyLogo from '@/assets/upstream-providers/new-api-legacy.png'
+import newAPIModernLogo from '@/assets/upstream-providers/new-api-modern.png'
+import type { Account, AccountPlatform, AccountSchedulerGroupScore, AccountType, Proxy as AccountProxy, AdminGroup, WindowStats, ClaudeModel, UpstreamBillingProbeSnapshot, UpstreamIdentitySnapshot, UpstreamQuotaQueryResult } from '@/types'
 
 const { t } = useI18n()
 const appStore = useAppStore()
@@ -761,6 +794,10 @@ const upstreamBillingSortRefreshes = ref(0)
 const upstreamBillingRateETag = ref<string | null>(null)
 const upstreamBillingRateRefreshing = ref(false)
 let upstreamBillingRateAbortController: AbortController | null = null
+const upstreamSiteLogoURLs = reactive(new Map<string, string>())
+const upstreamSiteLogoRequests = new Map<string, AbortController>()
+const upstreamSiteLogoUnavailable = new Set<string>()
+let visibleUpstreamSiteLogoKeys = new Set<string>()
 // Keep peak-window rendering current locally; the persisted snapshot request
 // is intentionally scheduled separately at five-minute intervals below.
 useIntervalFn(() => { upstreamBillingNow.value = Date.now() }, 60_000)
@@ -1111,6 +1148,16 @@ watch(
   { immediate: true }
 )
 
+watch(
+  () => accounts.value
+    .map(getUpstreamSiteLogoKey)
+    .filter(Boolean)
+    .sort()
+    .join(','),
+  () => syncVisibleUpstreamSiteLogos(),
+  { immediate: true }
+)
+
 const {
   selectedIds: selIds,
   allVisibleSelected,
@@ -1226,12 +1273,17 @@ const applyUpstreamBillingRateSnapshots = async (
     if (!item) return account
 
     const nextSnapshot = item.snapshot ?? null
+    const nextIdentity = item.identity ?? null
     const previousSnapshot = account.extra?.upstream_billing_probe ?? null
-    if (JSON.stringify(previousSnapshot) === JSON.stringify(nextSnapshot)) return account
+    const previousIdentity = account.extra?.upstream_identity ?? null
+    if (JSON.stringify(previousSnapshot) === JSON.stringify(nextSnapshot) &&
+      JSON.stringify(previousIdentity) === JSON.stringify(nextIdentity)) return account
 
     const nextExtra = { ...(account.extra ?? {}) }
     if (nextSnapshot) nextExtra.upstream_billing_probe = nextSnapshot
     else delete nextExtra.upstream_billing_probe
+    if (nextIdentity) nextExtra.upstream_identity = nextIdentity
+    else delete nextExtra.upstream_identity
     const nextAccount = { ...account, extra: nextExtra }
     syncAccountRefs(nextAccount)
     changed = true
@@ -1622,6 +1674,86 @@ function accountHomepageUrl(row: Account): string {
   if (row.type !== 'apikey' || typeof row.credentials?.base_url !== 'string') return ''
   const baseUrl = sanitizeUrl(row.credentials.base_url)
   return baseUrl ? new URL(baseUrl).origin : ''
+}
+
+type UpstreamIdentityBadgeMeta = {
+  label: string
+  logo: string
+  ariaLabel: string
+}
+
+function getUpstreamIdentityMeta(row: Account): UpstreamIdentityBadgeMeta | null {
+  if (row.platform !== 'openai' || row.type !== 'apikey') return null
+  const identity = row.extra?.upstream_identity as UpstreamIdentitySnapshot | undefined
+  if (!identity || identity.status !== 'identified') return null
+  if (identity.provider === 'sub2api') {
+    return {
+      label: 'Sub2API',
+      logo: '/logo.png',
+      ariaLabel: t('admin.accounts.upstreamBilling.identitySub2API')
+    }
+  }
+  if (identity.provider !== 'new_api') return null
+  if (identity.variant === 'legacy') {
+    return {
+      label: 'New API',
+      logo: newAPILegacyLogo,
+      ariaLabel: t('admin.accounts.upstreamBilling.identityNewAPILegacy')
+    }
+  }
+  if (identity.variant === 'modern') {
+    return {
+      label: 'New API',
+      logo: newAPIModernLogo,
+      ariaLabel: t('admin.accounts.upstreamBilling.identityNewAPIModern')
+    }
+  }
+  return null
+}
+
+function getUpstreamSiteLogoKey(row: Account): string {
+  const identity = row.extra?.upstream_identity as UpstreamIdentitySnapshot | undefined
+  return identity?.status === 'identified' && typeof identity.site_logo_key === 'string'
+    ? identity.site_logo_key
+    : ''
+}
+
+function getUpstreamSiteLogoURL(row: Account): string {
+  const key = getUpstreamSiteLogoKey(row)
+  return key ? upstreamSiteLogoURLs.get(key) || '' : ''
+}
+
+function syncVisibleUpstreamSiteLogos() {
+  const nextKeys = new Set(accounts.value.map(getUpstreamSiteLogoKey).filter(Boolean))
+  visibleUpstreamSiteLogoKeys = nextKeys
+  for (const [key, controller] of upstreamSiteLogoRequests) {
+    if (!nextKeys.has(key)) {
+      controller.abort()
+      upstreamSiteLogoRequests.delete(key)
+    }
+  }
+  for (const [key, objectURL] of upstreamSiteLogoURLs) {
+    if (!nextKeys.has(key)) {
+      URL.revokeObjectURL(objectURL)
+      upstreamSiteLogoURLs.delete(key)
+    }
+  }
+  for (const key of nextKeys) void loadUpstreamSiteLogo(key)
+}
+
+async function loadUpstreamSiteLogo(key: string) {
+  if (upstreamSiteLogoURLs.has(key) || upstreamSiteLogoRequests.has(key) || upstreamSiteLogoUnavailable.has(key)) return
+  const controller = new AbortController()
+  upstreamSiteLogoRequests.set(key, controller)
+  try {
+    const blob = await adminAPI.accounts.getUpstreamSiteLogo(key, controller.signal)
+    if (!visibleUpstreamSiteLogoKeys.has(key)) return
+    upstreamSiteLogoURLs.set(key, URL.createObjectURL(blob))
+  } catch {
+    if (!controller.signal.aborted) upstreamSiteLogoUnavailable.add(key)
+  } finally {
+    upstreamSiteLogoRequests.delete(key)
+  }
 }
 
 type OpenAICompactBadgeState = 'active' | 'blocked' | 'auto'
@@ -2646,6 +2778,11 @@ onUnmounted(() => {
   upstreamBillingFeedbackTimers.clear()
   upstreamQuotaFeedbackTimers.clear()
   invalidateUpstreamBillingRateHistoryCache()
+  upstreamSiteLogoRequests.forEach(controller => controller.abort())
+  upstreamSiteLogoRequests.clear()
+  visibleUpstreamSiteLogoKeys = new Set()
+  upstreamSiteLogoURLs.forEach(objectURL => URL.revokeObjectURL(objectURL))
+  upstreamSiteLogoURLs.clear()
   window.removeEventListener('scroll', handleScroll, true)
   document.removeEventListener('click', handleClickOutside)
 })

@@ -70,3 +70,14 @@ func TestUpstreamBillingRatesRouteIsRegistered(t *testing.T) {
 	// than the /:id route) is the registration assertion.
 	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
 }
+
+func TestUpstreamSiteLogoRouteIsRegistered(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	admin := router.Group("/api/v1/admin")
+	registerAccountRoutes(admin, upstreamQuotaRouteHandlers(), middleware.StepUpAuthMiddleware(func(c *gin.Context) { c.Next() }))
+
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/admin/accounts/upstream-site-logos/not-a-hash", nil))
+	require.Equal(t, http.StatusNotFound, recorder.Code)
+}

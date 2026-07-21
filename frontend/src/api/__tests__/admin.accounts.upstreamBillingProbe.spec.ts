@@ -14,6 +14,7 @@ import {
   getUpstreamBillingProbeSettings,
   getUpstreamBillingRateHistoryWithEtag,
   getUpstreamBillingRatesWithEtag,
+  getUpstreamSiteLogo,
   probeUpstreamBilling,
   probeUpstreamBillingBatch,
   queryUpstreamQuota,
@@ -69,6 +70,19 @@ describe('admin account upstream billing probe API', () => {
 
     await expect(queryUpstreamQuota(7)).resolves.toEqual(result)
     expect(post).toHaveBeenCalledWith('/admin/accounts/7/upstream-quota/query')
+  })
+
+  it('downloads one cached upstream site logo as a blob', async () => {
+    const blob = new Blob(['logo'], { type: 'image/png' })
+    const controller = new AbortController()
+    get.mockResolvedValueOnce({ data: blob })
+
+    await expect(getUpstreamSiteLogo('abc/def', controller.signal)).resolves.toBe(blob)
+    expect(get).toHaveBeenCalledWith('/admin/accounts/upstream-site-logos/abc%2Fdef', {
+      params: { v: 'cropped-1' },
+      responseType: 'blob',
+      signal: controller.signal
+    })
   })
 
   it('reads only persisted rate snapshots and supports ETag revalidation', async () => {
@@ -133,5 +147,4 @@ describe('admin account upstream billing probe API', () => {
       headers: { 'If-None-Match': '"history-v1"' }
     }))
   })
-
 })

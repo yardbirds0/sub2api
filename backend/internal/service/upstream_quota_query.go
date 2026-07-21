@@ -8,7 +8,6 @@ import (
 	"io"
 	"math"
 	"net/http"
-	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
@@ -699,18 +698,11 @@ func upstreamQuotaContextError(ctx context.Context) error {
 }
 
 func upstreamQuotaStatusURL(base string) (string, error) {
-	parsed, err := url.Parse(base)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return "", errors.New("invalid upstream base URL")
+	parsed, err := upstreamSiteRootURL(base)
+	if err != nil {
+		return "", err
 	}
-	parsed.User = nil
-	parsed.Scheme = strings.ToLower(parsed.Scheme)
-	parsed.Host = strings.ToLower(parsed.Host)
-	path := strings.TrimRight(parsed.Path, "/")
-	if openAIBaseURLHasVersionSuffix(path) {
-		path = path[:strings.LastIndex(path, "/")]
-	}
-	parsed.Path = strings.TrimRight(path, "/") + "/api/status"
+	parsed.Path = strings.TrimRight(parsed.Path, "/") + "/api/status"
 	parsed.RawPath = ""
 	parsed.RawQuery = ""
 	parsed.Fragment = ""

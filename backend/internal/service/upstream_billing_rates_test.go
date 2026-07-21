@@ -23,6 +23,13 @@ func TestBuildUpstreamBillingRateSnapshotItemsPreservesOrderAndDropsMalformedSna
 						"resolved_rate_multiplier": 2.5,
 					},
 				},
+				UpstreamIdentityExtraKey: map[string]any{
+					"detector_version": UpstreamIdentityDetectorVersion,
+					"status":           UpstreamIdentityStatusIdentified,
+					"provider":         UpstreamIdentityProviderNewAPI,
+					"variant":          UpstreamIdentityVariantModern,
+					"detected_at":      now.Format(time.RFC3339Nano),
+				},
 			},
 		},
 		{ID: 7, Extra: nil},
@@ -52,8 +59,11 @@ func TestBuildUpstreamBillingRateSnapshotItemsPreservesOrderAndDropsMalformedSna
 	require.Equal(t, int64(12), items[0].AccountID)
 	require.NotNil(t, items[0].Snapshot)
 	require.Equal(t, UpstreamBillingProbeStatusOK, items[0].Snapshot.Status)
+	require.NotNil(t, items[0].Identity)
+	require.Equal(t, UpstreamIdentityVariantModern, items[0].Identity.Variant)
 	require.Equal(t, int64(7), items[1].AccountID)
 	require.Nil(t, items[1].Snapshot)
+	require.Nil(t, items[1].Identity)
 	require.Equal(t, int64(3), items[2].AccountID)
 	require.Nil(t, items[2].Snapshot)
 	require.Equal(t, int64(5), items[3].AccountID)

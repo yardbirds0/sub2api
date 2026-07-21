@@ -98,6 +98,7 @@ type UpstreamBillingProbeResult struct {
 type UpstreamBillingRateSnapshotItem struct {
 	AccountID int64                         `json:"account_id"`
 	Snapshot  *UpstreamBillingProbeSnapshot `json:"snapshot"`
+	Identity  *UpstreamIdentitySnapshot     `json:"identity,omitempty"`
 }
 
 // BuildUpstreamBillingRateSnapshotItems projects account rows into the
@@ -108,12 +109,15 @@ func BuildUpstreamBillingRateSnapshotItems(accounts []Account) []UpstreamBilling
 	items := make([]UpstreamBillingRateSnapshotItem, 0, len(accounts))
 	for _, account := range accounts {
 		var snapshot *UpstreamBillingProbeSnapshot
+		var identity *UpstreamIdentitySnapshot
 		if account.Platform == PlatformOpenAI && account.Type == AccountTypeAPIKey {
 			snapshot = decodeUpstreamBillingProbeSnapshot(account.Extra)
+			identity = decodeDisplayableUpstreamIdentity(account.Extra)
 		}
 		items = append(items, UpstreamBillingRateSnapshotItem{
 			AccountID: account.ID,
 			Snapshot:  snapshot,
+			Identity:  identity,
 		})
 	}
 	return items
@@ -204,20 +208,21 @@ type UpstreamBillingProbeService struct {
 	accountTestService *AccountTestService
 	settingService     *SettingService
 
-	parentCtx    context.Context
-	parentCancel context.CancelFunc
-	wg           sync.WaitGroup
-	mu           sync.Mutex
-	started      bool
-	stopped      bool
-	cycleMu      sync.Mutex
-	probeGroup   singleflight.Group
-	quotaGroup   singleflight.Group
-	probeSlots   chan struct{}
-	now          func() time.Time
-	lockCache    LeaderLockCache
-	db           *sql.DB
-	instanceID   string
+	parentCtx       context.Context
+	parentCancel    context.CancelFunc
+	wg              sync.WaitGroup
+	mu              sync.Mutex
+	started         bool
+	stopped         bool
+	cycleMu         sync.Mutex
+	identityCycleMu sync.Mutex
+	probeGroup      singleflight.Group
+	quotaGroup      singleflight.Group
+	probeSlots      chan struct{}
+	now             func() time.Time
+	lockCache       LeaderLockCache
+	db              *sql.DB
+	instanceID      string
 }
 
 type upstreamBillingProbeSnapshotWriter interface {
@@ -279,14 +284,21 @@ func (s *UpstreamBillingProbeService) Start() {
 	}
 	s.started = true
 	_, hasHistoryPruner := s.accountRepo.(upstreamBillingRateHistoryPruner)
+	hasIdentityDetector := s.canRunUpstreamIdentityDetection()
 	s.wg.Add(1)
 	if hasHistoryPruner {
+		s.wg.Add(1)
+	}
+	if hasIdentityDetector {
 		s.wg.Add(1)
 	}
 	s.mu.Unlock()
 	go s.runLoop()
 	if hasHistoryPruner {
 		go s.runRateHistoryRetentionLoop()
+	}
+	if hasIdentityDetector {
+		go s.runUpstreamIdentityLoop()
 	}
 }
 

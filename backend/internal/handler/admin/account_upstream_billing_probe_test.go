@@ -33,6 +33,8 @@ func setupUpstreamBillingProbeRouter() *gin.Engine {
 type upstreamQuotaHandlerRepo struct {
 	service.AccountRepository
 	account *service.Account
+	logo    *service.UpstreamSiteLogo
+	logoKey string
 }
 
 func (r *upstreamQuotaHandlerRepo) GetByID(context.Context, int64) (*service.Account, error) {
@@ -40,6 +42,17 @@ func (r *upstreamQuotaHandlerRepo) GetByID(context.Context, int64) (*service.Acc
 		return nil, service.ErrAccountNotFound
 	}
 	return r.account, nil
+}
+
+func (r *upstreamQuotaHandlerRepo) GetUpstreamSiteLogoCache(_ context.Context, key string) (*service.UpstreamSiteLogo, bool, error) {
+	if key != r.logoKey || r.logo == nil {
+		return nil, false, nil
+	}
+	return r.logo, true, nil
+}
+
+func (r *upstreamQuotaHandlerRepo) PutUpstreamSiteLogoCache(context.Context, string, *service.UpstreamSiteLogo) error {
+	return nil
 }
 
 type upstreamQuotaHandlerHTTP struct {
@@ -101,6 +114,31 @@ func TestAccountHandlerQueryUpstreamQuotaRejectsInvalidID(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/admin/accounts/not-an-id/upstream-quota/query", nil))
 	require.Equal(t, http.StatusBadRequest, recorder.Code)
+}
+
+func TestAccountHandlerServesImmutableUpstreamSiteLogo(t *testing.T) {
+	key := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	repo := &upstreamQuotaHandlerRepo{
+		logoKey: key,
+		logo:    &service.UpstreamSiteLogo{ContentType: "image/png", Data: []byte("\x89PNG\r\n\x1a\ncustom")},
+	}
+	handler := NewAccountHandler(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	handler.SetUpstreamBillingProbeService(service.NewUpstreamBillingProbeService(repo, nil, nil))
+	router := gin.New()
+	router.GET("/admin/accounts/upstream-site-logos/:key", handler.GetUpstreamSiteLogo)
+
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/admin/accounts/upstream-site-logos/"+key, nil))
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, "image/png", recorder.Header().Get("Content-Type"))
+	require.Equal(t, "private, max-age=31536000, immutable", recorder.Header().Get("Cache-Control"))
+	require.Equal(t, `"`+key+`"`, recorder.Header().Get("ETag"))
+
+	notModified := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/admin/accounts/upstream-site-logos/"+key, nil)
+	request.Header.Set("If-None-Match", `"`+key+`"`)
+	router.ServeHTTP(notModified, request)
+	require.Equal(t, http.StatusNotModified, notModified.Code)
 }
 
 func TestAccountHandlerGetUpstreamBillingProbeSettingsReturnsDefaults(t *testing.T) {

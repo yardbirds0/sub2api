@@ -980,6 +980,14 @@ export async function queryUpstreamQuota(id: number): Promise<UpstreamQuotaQuery
   return data
 }
 
+export async function getUpstreamSiteLogo(key: string, signal?: AbortSignal): Promise<Blob> {
+  const { data } = await apiClient.get<Blob>(
+    `/admin/accounts/upstream-site-logos/${encodeURIComponent(key)}`,
+    { params: { v: 'cropped-1' }, responseType: 'blob', signal }
+  )
+  return data
+}
+
 export const accountsAPI = {
   list,
   listWithEtag,
@@ -1034,7 +1042,8 @@ export const accountsAPI = {
   setUpstreamBillingProbeEnabled,
   probeUpstreamBilling,
   probeUpstreamBillingBatch,
-  queryUpstreamQuota
+  queryUpstreamQuota,
+  getUpstreamSiteLogo
 }
 
 export default accountsAPI

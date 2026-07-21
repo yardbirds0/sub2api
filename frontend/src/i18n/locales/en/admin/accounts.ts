@@ -175,6 +175,10 @@ export default {
       usageWindowsHint: '"5h / 7d" are the upstream account\'s official rolling usage windows (e.g. OpenAI ChatGPT, Claude). They are imposed by the upstream provider on the account itself — not configured by sub2api, and unrelated to the models you map. Usage resets automatically once each window rolls over, and the limit cannot be lifted from within sub2api.',
       upstreamBilling: {
         trustWarning: 'The declared rate and quota are reported by the upstream site for the current API key. Sub2API cannot verify that they match actual charges or balance. The upstream site or an intermediary may return forged, stale, or modified data. Verify them against bills, balance changes, and actual usage. This column is sorted only by the declared rate; quota does not affect sorting.',
+        identitySub2API: 'Upstream type: Sub2API',
+        identityNewAPILegacy: 'Upstream type: legacy New API',
+        identityNewAPIModern: 'Upstream type: modern New API',
+        identitySiteLogo: 'Upstream site icon',
         rateLabel: 'Rate',
         quotaLabel: 'Balance',
         subscriptionDetails: 'See subscription',

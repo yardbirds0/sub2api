@@ -3,6 +3,11 @@ import { flushPromises, mount } from '@vue/test-utils'
 
 import AccountsView from '../AccountsView.vue'
 import type { UpstreamQuotaQueryResult } from '@/types'
+import {
+  getUpstreamBillingRateHistoryCache,
+  invalidateUpstreamBillingRateHistoryCache,
+  setUpstreamBillingRateHistoryCache
+} from '@/components/account/upstreamBillingRateHistoryCache'
 
 const {
   authUser,
@@ -14,6 +19,7 @@ const {
   getAllProxies,
   getAllGroups,
   getAccountById,
+  getUpstreamSiteLogo,
   queryUpstreamQuota,
   probeUpstreamBilling,
   getUsage,
@@ -21,7 +27,9 @@ const {
   showToast,
   hideToast,
   showError,
-  showSuccess
+  showSuccess,
+  createObjectURL,
+  revokeObjectURL
 } = vi.hoisted(() => ({
   authUser: { id: 99 },
   listAccounts: vi.fn(),
@@ -32,6 +40,7 @@ const {
   getAllProxies: vi.fn(),
   getAllGroups: vi.fn(),
   getAccountById: vi.fn(),
+  getUpstreamSiteLogo: vi.fn(),
   queryUpstreamQuota: vi.fn(),
   probeUpstreamBilling: vi.fn(),
   getUsage: vi.fn(),
@@ -39,7 +48,9 @@ const {
   showToast: vi.fn(),
   hideToast: vi.fn(),
   showError: vi.fn(),
-  showSuccess: vi.fn()
+  showSuccess: vi.fn(),
+  createObjectURL: vi.fn(() => 'blob:upstream-site-logo'),
+  revokeObjectURL: vi.fn()
 }))
 
 vi.mock('@/api/admin', () => ({
@@ -51,6 +62,7 @@ vi.mock('@/api/admin', () => ({
       getBatchTodayStats,
       getUpstreamBillingProbeSettings,
       getById: getAccountById,
+      getUpstreamSiteLogo,
       queryUpstreamQuota,
       probeUpstreamBilling,
       getUsage,
@@ -109,7 +121,7 @@ const DataTableStub = {
 
 const UpstreamBillingRateCellStub = {
   props: ['account', 'quotaResult', 'quotaError', 'quotaLoading', 'rateError', 'rateErrorAt', 'rateFeedback', 'quotaFeedback'],
-  emits: ['query-quota', 'probe'],
+  emits: ['query-quota', 'probe', 'open-history'],
   template: `
     <div
       data-test="quota-cell"
@@ -124,6 +136,7 @@ const UpstreamBillingRateCellStub = {
       <span data-test="quota-error">{{ quotaError ?? '' }}</span>
       <button data-test="query-quota" @click="$emit('query-quota')">query</button>
       <button data-test="probe-rate" @click="$emit('probe')">probe</button>
+      <button data-test="open-rate-history" @click="$emit('open-history')">history</button>
     </div>
   `
 }
@@ -220,6 +233,10 @@ const mountView = () => mount(AccountsView, {
       ReAuthAccountModal: true,
       AccountTestModal: true,
       AccountStatsModal: true,
+      UpstreamBillingRateHistoryDialog: {
+        props: ['show', 'account'],
+        template: '<div v-if="show" data-test="rate-history-dialog" :data-account-id="account?.id" />'
+      },
       ScheduledTestsPanel: true,
       SyncFromCrsModal: true,
       TempUnschedStatusModal: true,
@@ -247,7 +264,10 @@ describe('admin AccountsView upstream quota state', () => {
   })
 
   beforeEach(() => {
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createObjectURL })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL })
     localStorage.clear()
+    invalidateUpstreamBillingRateHistoryCache()
     authUser.id = 99
     for (const mock of [
       listAccounts,
@@ -258,6 +278,7 @@ describe('admin AccountsView upstream quota state', () => {
       getAllProxies,
       getAllGroups,
       getAccountById,
+      getUpstreamSiteLogo,
       queryUpstreamQuota,
       probeUpstreamBilling,
       getUsage,
@@ -265,8 +286,11 @@ describe('admin AccountsView upstream quota state', () => {
       showToast,
       hideToast,
       showError,
-      showSuccess
+      showSuccess,
+      createObjectURL,
+      revokeObjectURL
     ]) mock.mockReset()
+    createObjectURL.mockReturnValue('blob:upstream-site-logo')
 
     listAccounts.mockResolvedValue({
       items: [account(7), account(11)],
@@ -282,6 +306,7 @@ describe('admin AccountsView upstream quota state', () => {
     getAllProxies.mockResolvedValue([])
     getAllGroups.mockResolvedValue([])
     getAccountById.mockImplementation((id: number) => Promise.resolve(account(id)))
+	getUpstreamSiteLogo.mockResolvedValue(new Blob(['logo'], { type: 'image/png' }))
   })
 
   it('fetches selected balances in sequential groups of four with batch progress', async () => {
@@ -405,6 +430,37 @@ describe('admin AccountsView upstream quota state', () => {
     resolveAfterAccountUpdate(quotaResult)
     await flushPromises()
     expect(cell(7).get('[data-test="quota-result"]').text()).toBe('')
+    wrapper.unmount()
+  })
+
+  it('opens one account history and invalidates cache only when Base URL changes', async () => {
+    listAccounts.mockResolvedValue({
+      items: [account(7, { credentials: { base_url: 'https://upstream.example/v1' } }), account(11)],
+      total: 2,
+      page: 1,
+      page_size: 20,
+      pages: 1
+    })
+    const cachedHistory = { account_id: 7, range_days: 90 as const, truncated: false, events: [] }
+    setUpstreamBillingRateHistoryCache(7, 90, { data: cachedHistory, etag: '"history-v1"' })
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.get('[data-test="quota-cell"][data-account-id="7"] [data-test="open-rate-history"]').trigger('click')
+    expect(wrapper.get('[data-test="rate-history-dialog"]').attributes('data-account-id')).toBe('7')
+
+    const setupState = wrapper.vm.$.setupState as unknown as {
+      handleAccountUpdated: (updated: ReturnType<typeof account>) => void
+    }
+    setupState.handleAccountUpdated(account(7, {
+      credentials: { base_url: 'https://upstream.example/v1' }
+    }))
+    expect(getUpstreamBillingRateHistoryCache(7, 90)).toBeDefined()
+
+    setupState.handleAccountUpdated(account(7, {
+      credentials: { base_url: 'https://other.example/v1' }
+    }))
+    expect(getUpstreamBillingRateHistoryCache(7, 90)).toBeUndefined()
     wrapper.unmount()
   })
 
@@ -849,4 +905,61 @@ describe('admin AccountsView upstream quota state', () => {
     wrapper.unmount()
   })
 
+  it('renders only identified upstreams with their official generation logos', async () => {
+    const siteLogoKey = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+    listAccounts.mockResolvedValueOnce({
+      items: [
+        account(1, { extra: { upstream_identity: {
+          detector_version: 2, status: 'identified', provider: 'sub2api', site_logo_key: siteLogoKey, detected_at: '2026-07-20T00:00:00Z'
+        } } }),
+        account(2, { extra: { upstream_identity: {
+          detector_version: 1, status: 'identified', provider: 'new_api', variant: 'legacy', detected_at: '2026-07-20T00:00:00Z'
+        } } }),
+        account(3, { extra: { upstream_identity: {
+          detector_version: 1, status: 'identified', provider: 'new_api', variant: 'modern', detected_at: '2026-07-20T00:00:00Z'
+        } } }),
+        account(4, { extra: { upstream_identity: {
+          detector_version: 1, status: 'failed', detected_at: '2026-07-20T00:00:00Z'
+        } } })
+      ],
+      total: 4,
+      page: 1,
+      page_size: 20,
+      pages: 1
+    })
+
+    const wrapper = mountView()
+    await flushPromises()
+    const badge = (id: number) => wrapper.find(
+      `[data-test="virtual-row"][data-account-id="${id}"] [data-testid="upstream-identity-badge"]`
+    )
+
+    expect(badge(1).text()).toBe('Sub2API')
+    expect(badge(1).get('img').attributes('src')).toBe('/logo.png')
+    expect(badge(1).element.firstElementChild?.tagName).toBe('IMG')
+    expect(badge(2).text()).toBe('New API')
+    expect(badge(3).text()).toBe('New API')
+    expect(badge(2).get('img').attributes('src')).not.toBe(badge(3).get('img').attributes('src'))
+    expect(badge(2).element.firstElementChild?.tagName).toBe('IMG')
+    expect(badge(3).element.firstElementChild?.tagName).toBe('IMG')
+    expect(badge(2).attributes('title')).toBeUndefined()
+    expect(badge(3).attributes('title')).toBeUndefined()
+    expect(badge(4).exists()).toBe(false)
+    await vi.waitFor(() => expect(createObjectURL).toHaveBeenCalledOnce())
+    await wrapper.vm.$nextTick()
+    const siteBadge = wrapper.get(
+      '[data-test="virtual-row"][data-account-id="1"] [data-testid="upstream-site-logo-badge"]'
+    )
+    expect(getUpstreamSiteLogo).toHaveBeenCalledOnce()
+    expect(getUpstreamSiteLogo).toHaveBeenCalledWith(siteLogoKey, expect.any(AbortSignal))
+    expect(siteBadge.get('img').attributes('src')).toBe('blob:upstream-site-logo')
+    expect(siteBadge.attributes('title')).toBeUndefined()
+    expect(siteBadge.element.parentElement).toBe(badge(1).element.parentElement)
+    expect(siteBadge.element.previousElementSibling).toBe(badge(1).element)
+    expect(siteBadge.element.parentElement?.classList.contains('items-stretch')).toBe(true)
+    expect(siteBadge.element.parentElement?.classList.contains('overflow-hidden')).toBe(true)
+    expect(siteBadge.get('img').classes()).toContain('h-3.5')
+    wrapper.unmount()
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:upstream-site-logo')
+  })
 })

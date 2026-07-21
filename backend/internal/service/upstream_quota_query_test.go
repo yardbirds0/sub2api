@@ -1,8 +1,14 @@
 package service
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
+	"image"
+	"image/color"
+	"image/draw"
+	"image/png"
 	"io"
 	"net/http"
 	"reflect"
@@ -60,6 +66,55 @@ type upstreamQuotaTrackedBody struct {
 	closed atomic.Bool
 }
 
+type pendingUpstreamIdentityAccountRepo struct {
+	*upstreamBillingProbeAccountRepo
+	pending         []Account
+	detectorVersion int
+	limit           int
+}
+
+type pendingUpstreamIdentityLogoRepo struct {
+	*pendingUpstreamIdentityAccountRepo
+	logoMu sync.Mutex
+	logos  map[string]*UpstreamSiteLogo
+}
+
+func (r *pendingUpstreamIdentityLogoRepo) GetUpstreamSiteLogoCache(_ context.Context, key string) (*UpstreamSiteLogo, bool, error) {
+	r.logoMu.Lock()
+	defer r.logoMu.Unlock()
+	logo, found := r.logos[key]
+	return logo, found, nil
+}
+
+func (r *pendingUpstreamIdentityLogoRepo) PutUpstreamSiteLogoCache(_ context.Context, key string, logo *UpstreamSiteLogo) error {
+	r.logoMu.Lock()
+	defer r.logoMu.Unlock()
+	if _, found := r.logos[key]; !found {
+		r.logos[key] = logo
+	}
+	return nil
+}
+
+func (r *pendingUpstreamIdentityAccountRepo) ListPendingUpstreamIdentityAccounts(_ context.Context, detectorVersion, limit int) ([]Account, error) {
+	r.detectorVersion = detectorVersion
+	r.limit = limit
+	return append([]Account(nil), r.pending...), nil
+}
+
+func (r *pendingUpstreamIdentityAccountRepo) UpdateUpstreamIdentitySnapshot(_ context.Context, expected *Account, snapshot *UpstreamIdentitySnapshot) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	account := r.accounts[expected.ID]
+	if !sameUpstreamProtocolIdentity(expected, account) {
+		return ErrUpstreamQuotaIdentityChanged
+	}
+	if account.Extra == nil {
+		account.Extra = make(map[string]any)
+	}
+	account.Extra[UpstreamIdentityExtraKey] = snapshot
+	return nil
+}
+
 func (b *upstreamQuotaTrackedBody) Close() error {
 	b.closed.Store(true)
 	return nil
@@ -87,6 +142,247 @@ func validNewAPISubscriptionBody() string {
 
 func validNewAPIUsageBody() string {
 	return `{"object":"list","total_usage":1234}`
+}
+
+func TestRunPendingUpstreamIdentityDetectionPersistsOneBoundedBatch(t *testing.T) {
+	account := newUpstreamQuotaAccount(72)
+	baseRepo := &upstreamBillingProbeAccountRepo{accounts: map[int64]*Account{account.ID: account}}
+	repo := &pendingUpstreamIdentityAccountRepo{
+		upstreamBillingProbeAccountRepo: baseRepo,
+		pending:                         []Account{*account},
+	}
+	upstream := &upstreamQuotaHTTPStub{handler: func(req *http.Request) (*http.Response, error) {
+		require.Equal(t, "/v1/usage", req.URL.Path)
+		return quotaHTTPResponse(http.StatusOK, validSub2APIQuotaBody()), nil
+	}}
+	svc := newUpstreamBillingProbeTestService(repo, upstream, &upstreamBillingProbeSettingRepo{})
+	fixedNow := time.Date(2026, time.July, 20, 9, 30, 0, 0, time.UTC)
+	svc.now = func() time.Time { return fixedNow }
+
+	require.NoError(t, svc.RunPendingUpstreamIdentityDetection(context.Background()))
+	require.Equal(t, UpstreamIdentityDetectorVersion, repo.detectorVersion)
+	require.Equal(t, upstreamIdentityBatchSize, repo.limit)
+
+	baseRepo.mu.Lock()
+	stored := decodeUpstreamIdentitySnapshot(baseRepo.accounts[account.ID].Extra)
+	baseRepo.mu.Unlock()
+	require.NotNil(t, stored)
+	require.Equal(t, UpstreamIdentityStatusIdentified, stored.Status)
+	require.Equal(t, UpstreamIdentityProviderSub2API, stored.Provider)
+	require.Equal(t, fixedNow, stored.DetectedAt)
+}
+
+func TestRunPendingUpstreamIdentityDetectionReusesStrictStoredBillingSnapshot(t *testing.T) {
+	data, err := parseUpstreamBillingProbeResponse([]byte(`{
+		"object":"sub2api.key_billing",
+		"schema_version":1,
+		"billing_scope":"token",
+		"group_rate_multiplier":0.02,
+		"resolved_rate_multiplier":0.02,
+		"peak_rate_enabled":false,
+		"effective_rate_multiplier":0.02,
+		"observed_at":"2026-07-20T09:00:00Z"
+	}`))
+	require.NoError(t, err)
+	account := newUpstreamQuotaAccount(71)
+	account.Extra[UpstreamBillingProbeExtraKey] = map[string]any{
+		"status":          UpstreamBillingProbeStatusOK,
+		"data":            data,
+		"last_attempt_at": "2026-07-20T09:00:00Z",
+		"next_probe_at":   "2026-07-20T09:30:00Z",
+	}
+	baseRepo := &upstreamBillingProbeAccountRepo{accounts: map[int64]*Account{account.ID: account}}
+	repo := &pendingUpstreamIdentityAccountRepo{
+		upstreamBillingProbeAccountRepo: baseRepo,
+		pending:                         []Account{*account},
+	}
+	upstream := &upstreamQuotaHTTPStub{handler: func(*http.Request) (*http.Response, error) {
+		t.Fatal("stored billing snapshot should avoid an upstream request")
+		return nil, nil
+	}}
+	svc := newUpstreamBillingProbeTestService(repo, upstream, &upstreamBillingProbeSettingRepo{})
+
+	require.NoError(t, svc.RunPendingUpstreamIdentityDetection(context.Background()))
+	require.Empty(t, upstream.requests)
+
+	baseRepo.mu.Lock()
+	stored := decodeUpstreamIdentitySnapshot(baseRepo.accounts[account.ID].Extra)
+	baseRepo.mu.Unlock()
+	require.NotNil(t, stored)
+	require.Equal(t, UpstreamIdentityProviderSub2API, stored.Provider)
+}
+
+func TestUpstreamIdentityCachesOneCustomSiteLogoPerDeployment(t *testing.T) {
+	first := newUpstreamQuotaAccount(75)
+	second := newUpstreamQuotaAccount(76)
+	baseRepo := &upstreamBillingProbeAccountRepo{accounts: map[int64]*Account{first.ID: first, second.ID: second}}
+	repo := &pendingUpstreamIdentityLogoRepo{
+		pendingUpstreamIdentityAccountRepo: &pendingUpstreamIdentityAccountRepo{upstreamBillingProbeAccountRepo: baseRepo},
+		logos:                              make(map[string]*UpstreamSiteLogo),
+	}
+	var settingsCalls atomic.Int64
+	var logoCalls atomic.Int64
+	customPNG := "\x89PNG\r\n\x1a\ncustom-site-logo"
+	upstream := &upstreamQuotaHTTPStub{handler: func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/v1/usage":
+			return quotaHTTPResponse(http.StatusOK, validSub2APIQuotaBody()), nil
+		case "/api/v1/settings/public":
+			settingsCalls.Add(1)
+			return quotaHTTPResponse(http.StatusOK, `{"code":0,"data":{"site_logo":"/brand.png"}}`), nil
+		case "/brand.png":
+			logoCalls.Add(1)
+			return quotaHTTPResponse(http.StatusOK, customPNG), nil
+		default:
+			return nil, errors.New("unexpected path: " + req.URL.Path)
+		}
+	}}
+	svc := newUpstreamBillingProbeTestService(repo, upstream, &upstreamBillingProbeSettingRepo{})
+
+	require.NoError(t, svc.detectAndPersistUpstreamIdentity(context.Background(), first.ID))
+	require.NoError(t, svc.detectAndPersistUpstreamIdentity(context.Background(), second.ID))
+	require.Equal(t, int64(1), settingsCalls.Load())
+	require.Equal(t, int64(1), logoCalls.Load())
+
+	firstIdentity := decodeUpstreamIdentitySnapshot(baseRepo.accounts[first.ID].Extra)
+	secondIdentity := decodeUpstreamIdentitySnapshot(baseRepo.accounts[second.ID].Extra)
+	require.NotNil(t, firstIdentity)
+	require.NotNil(t, secondIdentity)
+	require.NotEmpty(t, firstIdentity.SiteLogoKey)
+	require.Equal(t, firstIdentity.SiteLogoKey, secondIdentity.SiteLogoKey)
+	logo, found, err := repo.GetUpstreamSiteLogoCache(context.Background(), firstIdentity.SiteLogoKey)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, "image/png", logo.ContentType)
+	require.Equal(t, []byte(customPNG), logo.Data)
+}
+
+func TestUpstreamIdentityDetectsStrictProviderAndNewAPIGeneration(t *testing.T) {
+	tests := []struct {
+		name       string
+		usageBody  string
+		statusBody string
+		provider   string
+		variant    string
+	}{
+		{name: "Sub2API", usageBody: validSub2APIQuotaBody(), provider: UpstreamIdentityProviderSub2API},
+		{
+			name:       "legacy New API",
+			statusBody: `{"success":true,"data":{"version":"v0.2.8.7","display_in_currency":true}}`,
+			provider:   UpstreamIdentityProviderNewAPI,
+			variant:    UpstreamIdentityVariantLegacy,
+		},
+		{
+			name:       "modern New API",
+			statusBody: `{"success":true,"data":{"version":"v1.0.0","logo":"/custom-logo.png","quota_display_type":"USD","display_in_currency":true}}`,
+			provider:   UpstreamIdentityProviderNewAPI,
+			variant:    UpstreamIdentityVariantModern,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			account := newUpstreamQuotaAccount(73)
+			upstream := &upstreamQuotaHTTPStub{handler: func(req *http.Request) (*http.Response, error) {
+				switch req.URL.Path {
+				case "/v1/usage":
+					if tt.usageBody != "" {
+						return quotaHTTPResponse(http.StatusOK, tt.usageBody), nil
+					}
+					return quotaHTTPResponse(http.StatusNotFound, `{}`), nil
+				case "/v1/dashboard/billing/subscription":
+					return quotaHTTPResponse(http.StatusOK, validNewAPISubscriptionBody()), nil
+				case "/api/status":
+					require.Empty(t, req.Header.Get("Authorization"))
+					return quotaHTTPResponse(http.StatusOK, tt.statusBody), nil
+				default:
+					return nil, errors.New("unexpected path: " + req.URL.Path)
+				}
+			}}
+			client := &upstreamQuotaQueryClient{
+				upstream: upstream,
+				account:  account,
+				baseURL:  "https://upstream.example/v1",
+				apiKey:   "sk-sensitive",
+			}
+			result, err := client.detectIdentity(context.Background())
+			require.NoError(t, err)
+			require.Equal(t, tt.provider, result.provider)
+			require.Equal(t, tt.variant, result.variant)
+			if tt.variant == UpstreamIdentityVariantModern {
+				require.Equal(t, "/custom-logo.png", result.logoCandidate)
+			}
+		})
+	}
+}
+
+func TestUpstreamSiteLogoHelpersUseDeploymentRootAndHTMLIcon(t *testing.T) {
+	keyA, err := upstreamSiteLogoCacheKey("https://UPSTREAM.example/subpath/v1")
+	require.NoError(t, err)
+	keyB, err := upstreamSiteLogoCacheKey("https://upstream.example/subpath")
+	require.NoError(t, err)
+	require.Equal(t, keyA, keyB)
+	require.Equal(t, "/assets/icon.webp", parseHTMLIconHref([]byte(`<html><head><link rel="shortcut icon" href="/assets/icon.webp"></head></html>`)))
+	require.Nil(t, validatedUpstreamSiteLogo([]byte(`<svg></svg>`)))
+}
+
+func TestNormalizeUpstreamSiteLogoForDisplayTrimsPadding(t *testing.T) {
+	var encoded bytes.Buffer
+	for _, background := range []color.Color{color.Transparent, color.White} {
+		source := image.NewNRGBA(image.Rect(0, 0, 32, 32))
+		draw.Draw(source, source.Bounds(), &image.Uniform{C: background}, image.Point{}, draw.Src)
+		draw.Draw(source, image.Rect(8, 8, 24, 24), &image.Uniform{C: color.Black}, image.Point{}, draw.Src)
+		encoded.Reset()
+		require.NoError(t, png.Encode(&encoded, source))
+
+		got := normalizeUpstreamSiteLogoForDisplay(&UpstreamSiteLogo{ContentType: "image/png", Data: encoded.Bytes()})
+		decoded, format, err := image.Decode(bytes.NewReader(got.Data))
+		require.NoError(t, err)
+		require.Equal(t, "png", format)
+		require.Equal(t, image.Rect(0, 0, 18, 18), decoded.Bounds())
+	}
+
+	ico := make([]byte, 22+encoded.Len())
+	binary.LittleEndian.PutUint16(ico[2:4], 1)
+	binary.LittleEndian.PutUint16(ico[4:6], 1)
+	ico[6], ico[7] = 32, 32
+	binary.LittleEndian.PutUint32(ico[14:18], uint32(encoded.Len()))
+	binary.LittleEndian.PutUint32(ico[18:22], 22)
+	copy(ico[22:], encoded.Bytes())
+	got := normalizeUpstreamSiteLogoForDisplay(&UpstreamSiteLogo{ContentType: "image/x-icon", Data: ico})
+	require.Equal(t, "image/png", got.ContentType)
+	decoded, _, err := image.Decode(bytes.NewReader(got.Data))
+	require.NoError(t, err)
+	require.Equal(t, image.Rect(0, 0, 18, 18), decoded.Bounds())
+
+	palette := color.Palette{color.White, color.Black}
+	paletted := image.NewPaletted(image.Rect(0, 0, 1254, 1254), palette)
+	draw.Draw(paletted, image.Rect(179, 150, 1055, 1017), &image.Uniform{C: color.Black}, image.Point{}, draw.Src)
+	encoded.Reset()
+	require.NoError(t, png.Encode(&encoded, paletted))
+	got = normalizeUpstreamSiteLogoForDisplay(&UpstreamSiteLogo{ContentType: "image/png", Data: encoded.Bytes()})
+	require.LessOrEqual(t, int64(len(got.Data)), upstreamSiteLogoMaxBytes)
+	decoded, _, err = image.Decode(bytes.NewReader(got.Data))
+	require.NoError(t, err)
+	require.Equal(t, image.Rect(0, 0, 884, 875), decoded.Bounds())
+}
+
+func TestUpstreamIdentityRequiresResolvedNewAPIGeneration(t *testing.T) {
+	account := newUpstreamQuotaAccount(74)
+	upstream := &upstreamQuotaHTTPStub{handler: func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/v1/usage":
+			return quotaHTTPResponse(http.StatusNotFound, `{}`), nil
+		case "/v1/dashboard/billing/subscription":
+			return quotaHTTPResponse(http.StatusOK, validNewAPISubscriptionBody()), nil
+		case "/api/status":
+			return quotaHTTPResponse(http.StatusOK, `{"success":true,"data":{"version":"custom"}}`), nil
+		default:
+			return nil, errors.New("unexpected request")
+		}
+	}}
+	client := &upstreamQuotaQueryClient{upstream: upstream, account: account, baseURL: "https://upstream.example/v1", apiKey: "sk-sensitive"}
+	_, err := client.detectIdentity(context.Background())
+	require.ErrorIs(t, err, ErrUpstreamQuotaInvalidResponse)
 }
 
 func TestUpstreamQuotaParsesAllSub2APIModes(t *testing.T) {

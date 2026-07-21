@@ -907,9 +907,23 @@ export interface UpstreamBillingProbeResult {
   error?: string
 }
 
+export type UpstreamIdentityProvider = 'sub2api' | 'new_api'
+export type UpstreamIdentityVariant = 'legacy' | 'modern'
+
+export interface UpstreamIdentitySnapshot {
+  detector_version: number
+  status: 'identified'
+  provider: UpstreamIdentityProvider
+  variant?: UpstreamIdentityVariant
+  version?: string
+  site_logo_key?: string
+  detected_at: string
+}
+
 export interface UpstreamBillingRateSnapshotItem {
   account_id: number
   snapshot?: UpstreamBillingProbeSnapshot | null
+  identity?: UpstreamIdentitySnapshot | null
 }
 
 export interface UpstreamBillingRatesResponse {
