@@ -74,7 +74,7 @@
                 {{ probeReasonText }}
               </p>
               <p
-                v-if="probeEnabled && globalProbeEnabled !== false && nextProbeAt"
+                v-if="automaticProbeActive && nextProbeAt"
                 data-testid="upstream-billing-next-probe"
               >
                 {{ t('admin.accounts.upstreamBilling.nextProbeAt', { value: formatDate(nextProbeAt) }) }}
@@ -99,7 +99,16 @@
               class="font-medium text-amber-300"
               data-testid="upstream-billing-stale-notice"
             >
-              {{ t('admin.accounts.upstreamBilling.staleCacheNotice', { age: elapsedSinceLastSuccess }) }}
+              {{
+                t(
+                  !automaticProbeActive
+                    ? 'admin.accounts.upstreamBilling.manualProbeNotice'
+                    : scheduledProbeOverdue
+                      ? 'admin.accounts.upstreamBilling.staleProbeOverdueNotice'
+                      : 'admin.accounts.upstreamBilling.staleCacheNotice',
+                  { age: elapsedSinceLastSuccess }
+                )
+              }}
             </p>
             <div
               v-if="rateFailureReasonText"
@@ -262,10 +271,16 @@ const snapshot = computed<UpstreamBillingProbeSnapshot | undefined>(() => props.
 const data = computed(() => snapshot.value?.data)
 const quota = computed(() => props.quotaResult?.quota ?? null)
 const probeEnabled = computed(() => props.account.extra?.upstream_billing_probe_enabled === true)
+const automaticProbeActive = computed(() => probeEnabled.value && props.globalProbeEnabled !== false)
 const nextProbeAt = computed(() => {
   const value = snapshot.value?.next_probe_at
   return typeof value === 'string' && Number.isFinite(Date.parse(value)) ? value : ''
 })
+const scheduledProbeOverdue = computed(() => (
+  automaticProbeActive.value &&
+  nextProbeAt.value !== '' &&
+  props.now > Date.parse(nextProbeAt.value) + CLOCK_SKEW_TOLERANCE_MS
+))
 const receivedAt = computed(() => typeof snapshot.value?.received_at === 'string' ? Date.parse(snapshot.value.received_at) : Number.NaN)
 const freshUntil = computed(() => {
   if (typeof snapshot.value?.fresh_until === 'string') return Date.parse(snapshot.value.fresh_until)
@@ -415,7 +430,7 @@ const rateFailureReasonText = computed(() => {
 })
 const rateFailureGuidanceText = computed(() => (
   hasNumericRate.value
-    ? t('admin.accounts.upstreamBilling.failedCachedRateNotice', { age: elapsedSinceLastSuccess.value })
+    ? t('admin.accounts.upstreamBilling.manualProbeNotice', { age: elapsedSinceLastSuccess.value })
     : t('admin.accounts.upstreamBilling.failedNoRateNotice')
 ))
 const rateFailureAt = computed(() => (

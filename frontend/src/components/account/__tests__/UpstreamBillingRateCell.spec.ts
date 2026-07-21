@@ -491,7 +491,7 @@ describe('UpstreamBillingRateCell', () => {
     expect(errorDetails?.children).toHaveLength(3)
     expect(errorDetails?.lastElementChild).toBe(errorGuidance)
     expect(errorGuidance?.textContent).toContain(
-      'admin.accounts.upstreamBilling.failedCachedRateNotice:'
+      'admin.accounts.upstreamBilling.manualProbeNotice:'
     )
     wrapper.unmount()
   })
@@ -540,7 +540,7 @@ describe('UpstreamBillingRateCell', () => {
     expect(wrapper.get('[data-testid="upstream-billing-rate"]').classes()).toContain('text-red-600')
     expect(tooltip.querySelector('[data-testid="upstream-billing-stale-notice"]')).toBeNull()
     expect(tooltip.querySelector('[data-testid="upstream-billing-error-guidance"]')?.textContent).toContain(
-      'admin.accounts.upstreamBilling.failedCachedRateNotice:'
+      'admin.accounts.upstreamBilling.manualProbeNotice:'
     )
 
     await wrapper.setProps({
@@ -558,6 +558,73 @@ describe('UpstreamBillingRateCell', () => {
     })
     expect(tooltip.querySelector('[data-testid="upstream-billing-next-probe"]')).toBeNull()
     expect(tooltip.querySelector('[data-testid="upstream-billing-probe-state"] span')?.className).toContain('text-red-400')
+    wrapper.unmount()
+  })
+
+  it('directs an overdue automatic probe to the row action after a page refresh', async () => {
+    const wrapper = mount(UpstreamBillingRateCell, {
+      attachTo: document.body,
+      props: {
+        account: makeAccount({
+          extra: {
+            upstream_billing_probe_enabled: true,
+            upstream_billing_probe: {
+              status: 'ok',
+              data: billingData,
+              received_at: '2026-07-12T22:00:00Z',
+              fresh_until: '2026-07-12T23:00:00Z',
+              last_attempt_at: '2026-07-12T22:00:00Z',
+              next_probe_at: '2026-07-13T00:00:00Z'
+            }
+          }
+        }),
+        now: Date.now()
+      }
+    })
+
+    await wrapper.get('[data-testid="upstream-billing-details"]').trigger('mouseenter')
+    await flushPromises()
+
+    const notices = document.body.querySelectorAll('[data-testid="upstream-billing-stale-notice"]')
+    expect(notices[notices.length - 1]?.textContent).toContain(
+      'admin.accounts.upstreamBilling.staleProbeOverdueNotice:'
+    )
+    wrapper.unmount()
+  })
+
+  it.each([
+    ['account probe is disabled', false, true],
+    ['global probe is disabled', true, false]
+  ])('directs stale data to the row action when %s', async (_state, accountEnabled, globalEnabled) => {
+    const wrapper = mount(UpstreamBillingRateCell, {
+      attachTo: document.body,
+      props: {
+        account: makeAccount({
+          extra: {
+            upstream_billing_probe_enabled: accountEnabled,
+            upstream_billing_probe: {
+              status: 'ok',
+              data: billingData,
+              received_at: '2026-07-12T22:00:00Z',
+              fresh_until: '2026-07-12T23:00:00Z',
+              last_attempt_at: '2026-07-12T22:00:00Z',
+              next_probe_at: '2026-07-13T00:00:00Z'
+            }
+          }
+        }),
+        globalProbeEnabled: globalEnabled,
+        now: Date.now()
+      }
+    })
+
+    await wrapper.get('[data-testid="upstream-billing-details"]').trigger('mouseenter')
+    await flushPromises()
+
+    const notices = document.body.querySelectorAll('[data-testid="upstream-billing-stale-notice"]')
+    const notice = notices[notices.length - 1]
+    expect(notice?.textContent).toContain('admin.accounts.upstreamBilling.manualProbeNotice:')
+    expect(notice?.textContent).not.toContain('admin.accounts.upstreamBilling.staleCacheNotice:')
+    expect(document.body.querySelector('[data-testid="upstream-billing-next-probe"]')).toBeNull()
     wrapper.unmount()
   })
 
